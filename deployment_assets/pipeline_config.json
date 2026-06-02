@@ -1,0 +1,30 @@
+{
+    "feature_cols": [
+        "ENGINE_RPM",
+        "SPEED",
+        "ENGINE_COOLANT_TEMP",
+        "Oil_Pressure_PSI",
+        "Ratio_RPM_Speed",
+        "Thermal_Stress",
+        "Is_Idle"
+    ],
+    "time_steps": 5,
+    "gap_threshold_ms": 60000,
+    "model_input_shape": [
+        null,
+        5,
+        7
+    ],
+    "classes": [
+        "Fault",
+        "Normal"
+    ],
+    "prediction_threshold": 0.5,
+    "target_positive_class": "Fault",
+    "engineered_features": {
+        "Ratio_RPM_Speed": "ENGINE_RPM / (SPEED + 1)",
+        "Thermal_Stress": "ENGINE_RPM * ENGINE_COOLANT_TEMP",
+        "Is_Idle": "int(SPEED < 1)",
+        "Oil_Pressure_PSI": "constant = 30.0"
+    }
+}
