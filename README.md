@@ -1,41 +1,66 @@
+<div align="center">
+
 # Intelligent Vehicle Fault Diagnosis Engine
 
-An end-to-end MLOps pipeline and backend architecture for vehicle diagnostics. This system processes time-series OBD-II sensor data to classify vehicle states as normal or faulty, providing real-time predictive maintenance capabilities.
+### Stateful temporal LSTM over streaming OBD-II sensor data
 
-## Architecture Evolution
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://python.org)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras_LSTM-FF6F00?logo=tensorflow&logoColor=white)](https://tensorflow.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Streaming_Inference-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-This repository captures the transition from a traditional machine learning approach to an advanced deep learning architecture specifically tailored for temporal sensor data.
+**An end-to-end MLOps engine that turns a stream of OBD-II sensor readings into real-time predictive-maintenance diagnoses — using a stateful LSTM and a per-vehicle sliding-window inference service.**
 
-1. **Phase 1: Baseline Random Forest Cascade (`notebooks/RF_Baseline_Cascade.ipynb`)**
-   - The initial approach utilized a cascade of Random Forest classifiers. A "Gatekeeper" binary classifier first determined if the vehicle was in a normal or faulty state. If faulty, a "Specialist" multi-class model identified the specific OBD-II error code. 
-   - While effective for tabular snapshots, this approach struggled to capture the sequential degradation of engine components over time.
+</div>
 
-2. **Phase 2: Temporal LSTM Engine (`notebooks/LSTM_Comp.ipynb`)**
-   - To better leverage the time-series nature of OBD-II data, we transitioned to a stateful LSTM (Long Short-Term Memory) network.
-   - The LSTM effectively models temporal patterns across sequential readings, outperforming the baseline Random Forest by capturing the trajectory of thermal stress and RPM/Speed ratios across entire trips.
-   - **This LSTM architecture is the final production model powering the backend.**
+---
 
-## End-to-End Operational Pipeline
+## From Snapshot Classifier to Temporal Model
 
-The `api/` directory contains the production-ready FastAPI backend designed to serve the LSTM model in a highly concurrent environment.
+This repo captures a deliberate architecture evolution:
 
-### Stateful Sliding Window Inference
-The `model_service.py` implements a robust in-memory buffer system that handles asynchronous streams of sensor data:
-- **Vehicle Tracking**: The service tracks independent reading buffers for unique `vehicle_id`s.
-- **Trip Boundary Detection**: If a reading is delayed by more than ~60 seconds, the system detects a "new trip" and automatically resets the sequence buffer.
-- **Sliding Window**: The system requires a window of 5 consecutive readings to form a complete temporal sequence. Once 5 readings are collected, a diagnosis is yielded. Each subsequent reading slides the window forward by one step, providing continuous real-time monitoring.
+| Phase | Approach | Limitation / Outcome |
+|---|---|---|
+| **1 — Baseline** (`notebooks/RF_Baseline_Cascade.ipynb`) | Random Forest cascade: a binary "gatekeeper" (normal/faulty) feeding a multi-class specialist for the specific OBD-II error code | Effective on tabular snapshots, but blind to how components degrade *over time* |
+| **2 — Production** (`notebooks/LSTM_Comp.ipynb`) | Stateful LSTM over sequential readings | Captures the trajectory of thermal stress and RPM/speed ratios across a trip — **this powers the backend** |
 
-## Tech Stack
-- **Deep Learning**: TensorFlow / Keras (LSTM)
-- **Machine Learning**: Scikit-Learn, Pandas, NumPy
-- **Backend API**: FastAPI, Pydantic, Uvicorn
-- **Environment**: Python 3.10+
+---
 
-## API Usage
+## Real-Time Serving Architecture
 
-The system exposes a unified diagnosis endpoint designed for a connected Android application or edge device.
+```mermaid
+flowchart TD
+    A["Android app / edge device"] -- "POST /api/v1/predict<br/>{ vehicle_id, reading }" --> API["FastAPI backend"]
+    API --> MS["ModelService (thread-safe singleton)"]
 
-**POST `/api/v1/predict`**
+    subgraph BUF["Per-vehicle sliding window (VehicleBuffer)"]
+        MS --> P["push(reading)"]
+        P --> TRIP{"gap > threshold<br/>or timestamp < last?"}
+        TRIP -- "yes" --> CLR["clear buffer<br/>(new trip detected)"]
+        TRIP -- "no" --> APP["append to deque (maxlen = 5)"]
+        CLR --> APP
+    end
+
+    APP --> RDY{"window full<br/>(5 readings)?"}
+    RDY -- "no" --> COL["status: collecting"]
+    RDY -- "yes" --> INF["LSTM inference<br/>scaler + label encoder<br/>→ diagnosis + DTC alert"]
+    COL --> API
+    INF --> API
+```
+
+### Stateful Sliding-Window Inference
+
+The `model_service.py` (verified) implements a thread-safe `ModelService` singleton owning one `VehicleBuffer` (a `deque(maxlen=TIME_STEPS)`) per `vehicle_id`:
+
+- **Sliding window** — needs 5 consecutive readings to form a sequence; each new reading slides the window forward for continuous monitoring.
+- **Trip-boundary detection** — if a reading arrives after a large time gap **or with a backwards timestamp**, the buffer resets (a new trip has begun), preventing cross-trip contamination.
+- **DTC alert mapping** — diagnoses map to human-readable OBD-II error alerts.
+
+---
+
+## API
+
+**`POST /api/v1/predict`**
 
 ```json
 {
@@ -49,17 +74,35 @@ The system exposes a unified diagnosis endpoint designed for a connected Android
 }
 ```
 
-The system manages the buffer internally. It returns a `collecting` status until the window is full, after which it returns a `ready` status with the diagnosis.
+Returns `collecting` until the window fills, then `ready` with the diagnosis. Health check at `GET /api/v1/health`.
 
-## ⚠️ Note on Weights and Datasets
+---
 
-**Heavy artifacts (such as `.h5`, `.keras`, and `.joblib` model weights) and raw CSV/JSON datasets are intentionally excluded from this repository to maintain a clean and lightweight version control history.**
+## Running Locally
 
-To run the backend API locally:
-1. Run the `notebooks/LSTM_Comp.ipynb` notebook to train the network on your local machine using your own OBD-II datasets.
-2. Ensure the resulting `.keras` / `.h5` weights and `.pkl` encoders are saved in the `deployment_assets/` directory.
-3. Install dependencies: `pip install -r requirements.txt`
-4. Start the FastAPI server: `uvicorn api.main:app --host 0.0.0.0 --port 8000`
+```bash
+git clone https://github.com/YazanAi-Dev3/Vehicle-Fault-Diagnosis-Engine.git
+cd Vehicle-Fault-Diagnosis-Engine
+pip install -r requirements.txt
+
+# Train via notebooks/LSTM_Comp.ipynb, save .keras/.h5 + encoders to deployment_assets/
+uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+> Heavy artifacts (`.h5`, `.keras`, `.joblib`, raw CSV/JSON datasets) are intentionally excluded from version control.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Deep Learning | TensorFlow / Keras (LSTM) |
+| Classical ML | scikit-learn, Pandas, NumPy |
+| Backend | FastAPI, Pydantic, Uvicorn |
+
+---
 
 ## License
-MIT License
+
+MIT.
